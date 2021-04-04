@@ -1,4 +1,6 @@
-# Copyright 2017 Vicent Cubells - <vicent.cubells@tecnativa.com>
+# Copyright 2017 Tecnativa - Vicent Cubells
+# Copyright 2021 Tecnativa - Pedro M. Baeza
+# Copyright 2021 Tecnativa - Víctor Martínez
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
 
 from odoo.exceptions import UserError, ValidationError
@@ -160,6 +162,45 @@ class TestHrExpenseInvoice(common.SavepointCase):
         # We make payment on expense sheet
         self._register_payment(self.sheet)
 
+    def test_1_hr_test_invoice_paid_by_company(self):
+        # There is no expense lines in sheet
+        self.assertEqual(len(self.sheet.expense_line_ids), 0)
+        # We add an expense
+        self.expense.unit_amount = 100.0
+        self.expense.payment_mode = "company_account"
+        self.sheet.expense_line_ids = [(6, 0, [self.expense.id])]
+        self.assertEqual(len(self.sheet.expense_line_ids), 1)
+        # We add invoice to expense
+        self.invoice.action_post()  # residual = 100.0
+        self.expense.invoice_id = self.invoice
+        # Test that invoice can't register payment by itself
+        ctx = {
+            "active_ids": [self.invoice.id],
+            "active_id": self.invoice.id,
+            "active_model": "account.move",
+        }
+        PaymentWizard = self.env["account.payment"]
+        view_id = "account.view_account_payment_invoice_form"
+        with Form(PaymentWizard.with_context(ctx), view=view_id) as f:
+            f.amount = 100.0
+            f.journal_id = self.cash_journal
+        payment = f.save()
+        with self.assertRaises(ValidationError):
+            payment.action_validate_invoice_payment()
+        # We approve sheet
+        self.sheet.approve_expense_sheets()
+        self.assertEqual(self.sheet.state, "approve")
+        self.assertFalse(self.sheet.account_move_id)
+        self.assertEqual(self.invoice.state, "posted")
+        # We post journal entries
+        self.sheet.with_context(
+            {"default_expense_line_ids": self.expense.id}
+        ).action_sheet_move_create()
+        self.assertEqual(self.sheet.state, "done")
+        self.assertTrue(self.sheet.account_move_id)
+        # Invoice is not paid
+        self.assertEqual(self.invoice.invoice_payment_state, "not_paid")
+
     def test_2_hr_test_multi_invoices(self):
         # There is no expense lines in sheet
         self.assertEqual(len(self.sheet.expense_line_ids), 0)
@@ -190,79 +231,6 @@ class TestHrExpenseInvoice(common.SavepointCase):
         self.assertEqual(self.invoice.invoice_payment_state, "paid")
         # We make payment on expense sheet
         self._register_payment(self.sheet)
-
-    def test_3_hr_test_expense_create_invoice(self):
-        # There is no expense lines in sheet
-        self.assertEqual(len(self.sheet.expense_line_ids), 0)
-        # We add 3 expenses
-        self.sheet.expense_line_ids = [
-            (6, 0, [self.expense.id, self.expense2.id, self.expense3.id])
-        ]
-        self.assertEqual(len(self.sheet.expense_line_ids), 3)
-        # We create 1st invoice from expense 1, 2
-        ctx = {
-            "active_id": self.sheet.id,
-            "active_ids": [self.sheet.id],
-            "active_model": "hr.expense.sheet",
-        }
-        vals = {"expense_ids": [(6, 0, [self.expense.id, self.expense2.id])]}
-        Wizard = self.env["hr.expense.create.invoice"]
-        with self.assertRaises(UserError):
-            wizard = Wizard.with_context(ctx).create(vals)
-        self.sheet.approve_expense_sheets()
-        wizard = Wizard.with_context(ctx).create(vals)
-        invoice = wizard.create_invoice()
-        # A new invoice is created
-        self.assertEqual(
-            [invoice.id], self.sheet.expense_line_ids.mapped("invoice_id").ids
-        )
-        self.assertEqual(self.sheet.invoice_count, 1)
-        res = self.sheet.action_view_invoices()
-        # Click on View Invoice button link to the correct invoice
-        self.assertEqual(res["res_id"], invoice.id)
-        # We create 2nd invoice from expense 3
-        ctx = {
-            "active_id": self.sheet.id,
-            "active_ids": [self.sheet.id],
-            "active_model": "hr.expense.sheet",
-        }
-        vals = {"expense_ids": [(6, 0, [self.expense3.id])]}
-        Wizard = self.env["hr.expense.create.invoice"]
-        self.sheet.approve_expense_sheets()
-        wizard = Wizard.with_context(ctx).create(vals)
-        invoice2 = wizard.create_invoice()
-        # Now there are 2 invoices and can't create new invoice
-        with self.assertRaises(UserError):
-            wizard.create_invoice()
-        self.assertItemsEqual(
-            [invoice.id, invoice2.id],
-            self.sheet.expense_line_ids.mapped("invoice_id").ids,
-        )
-        self.sheet.invalidate_cache()  # Make sure invoice_count is recalc
-        self.assertEqual(self.sheet.invoice_count, 2)
-        # We can't post entry now, we must validate invoice first
-        with self.assertRaises(UserError):
-            self.sheet.action_sheet_move_create()
-        # Validate Invoice
-        invoice.partner_id = self.partner
-        invoice.account_id = self.invoice_account
-        invoice2.partner_id = self.partner
-        invoice2.account_id = self.invoice_account
-        invoice.action_post()
-        invoice2.action_post()
-        self.sheet.with_context(
-            {"default_expense_line_ids": self.expense.id}
-        ).action_sheet_move_create()
-        self.assertEqual(self.sheet.state, "post")
-        self.assertTrue(self.sheet.account_move_id)
-        # Invoice are now paid
-        self.assertEqual(invoice.state, "posted")
-        self.assertEqual(invoice2.state, "posted")
-        # We make payment on expense sheet
-        self._register_payment(self.sheet)
-        # Click on View Invoice button link to the correct invoice
-        res = self.sheet.action_view_invoices()
-        self.assertEqual(res["view_mode"], "tree,form")
 
     def test_4_hr_expense_constraint(self):
         # Only invoice with status open is allowed

@@ -1,5 +1,6 @@
-# Copyright 2015 Pedro M. Baeza <pedro.baeza@tecnativa.com>
-# Copyright 2017 Vicent Cubells <vicent.cubells@tecnativa.com>
+# Copyright 2015-2020 Tecnativa - Pedro M. Baeza
+# Copyright 2017 Tecnativa - Vicent Cubells
+# Copyright 2020 Tecnativa - David Vidal
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 
 from odoo import _, api, fields, models
@@ -12,7 +13,11 @@ class HrExpense(models.Model):
     invoice_id = fields.Many2one(
         comodel_name="account.move",
         string="Vendor Bill",
-        domain="[('type', '=', 'in_invoice'), ('state', '=', 'posted')]",
+        domain=[
+            ("type", "=", "in_invoice"),
+            ("state", "=", "posted"),
+            ("invoice_payment_state", "=", "not_paid"),
+        ],
         copy=False,
     )
 
@@ -27,6 +32,7 @@ class HrExpense(models.Model):
                 raise UserError(_("Vendor bill state must be Posted"))
 
     def _get_account_move_line_values(self):
+        """It overrides the journal item values to match the invoice payable one."""
         move_line_values_by_expense = super()._get_account_move_line_values()
         for expense_id, move_lines in move_line_values_by_expense.items():
             expense = self.browse(expense_id)
@@ -41,3 +47,14 @@ class HrExpense(models.Model):
                         lambda l: l.account_internal_type == "payable"
                     ).account_id.id
         return move_line_values_by_expense
+
+    @api.onchange("invoice_id")
+    def _onchange_invoice_id(self):
+        """Get expense amount from invoice amount. Otherwise it will do a
+        mismatch when trying to post the account move. We do that ensuring we
+        have the same total amount with quantity 1 and without taxes.
+        """
+        if self.invoice_id:
+            self.quantity = 1
+            self.unit_amount = self.invoice_id.amount_total
+            self.tax_ids = [(5,)]
